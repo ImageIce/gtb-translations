@@ -22,6 +22,18 @@ Database Changes Report in its Actions summary. Published updates also get a rep
 The upstream project documents
 the crawler and its configuration in the [maintainers guide](crowdin_api/MAINTAINERS.md).
 
+### GtbStructures stats translations
+
+The `crowdin` sync also refreshes [`lib/source/stats-translations.json`](lib/source/stats-translations.json).
+It contains Hypixel chat, scoreboard, rank, and lobby templates matched to the GtbStructures 1.8.9
+stats parser. The [string selection](crowdin_api/conf/stats-strings.json) maps stable output names
+to Crowdin file and string IDs.
+
+Each entry has the Crowdin `id`, `file_id`, `key`, English `source`, and a `translations` object
+keyed by language. Translations preserve Crowdin placeholders and formatting tokens, including
+`%%player%%` and `%%yellow%%`. Pirate English and Brazilian Portuguese use the GtbStructures
+codes `pirate` and `pt_br`. Languages with no translation are omitted from that string's entry.
+
 GTB Platform is a comprehensive training and statistics platform for Hypixel Guess The Build players, featuring three main components:
 
 ## `1` GTB Word Hint Training [👉 Here](https://gtb.zmh.me)

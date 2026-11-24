@@ -6,8 +6,12 @@ if (![before, after].every((sha) => /^[0-9a-f]{40}$/.test(sha))) {
   throw new Error('Usage: node database-report.mjs <previous commit SHA> <current commit SHA>');
 }
 
-function readJson(sha, file) {
-  return JSON.parse(execFileSync('git', ['show', `${sha}:lib/source/${file}`], {
+function readJson(sha, file, fallback = null) {
+  const path = `lib/source/${file}`;
+  if (fallback !== null && !execFileSync('git', ['ls-tree', sha, '--', path], { encoding: 'utf8' })) {
+    return fallback;
+  }
+  return JSON.parse(execFileSync('git', ['show', `${sha}:${path}`], {
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
   }));
@@ -58,6 +62,8 @@ const previousVersion = readJson(before, 'versions.json').last_updated;
 const currentVersion = readJson(after, 'versions.json').last_updated;
 const oldThemes = themeMap(readJson(before, 'translations-data.json'));
 const newThemes = themeMap(readJson(after, 'translations-data.json'));
+const oldStats = readJson(before, 'stats-translations.json', {});
+const newStats = readJson(after, 'stats-translations.json', {});
 const themeKeys = new Set([...oldThemes.keys(), ...newThemes.keys()]);
 const themeChanges = [];
 const shortcuts = [];
@@ -115,6 +121,14 @@ addSection(report, `Themes (${themeChanges.length})`, themeChanges);
 addSection(report, `Shortcut changes (${shortcuts.length} themes)`, shortcuts);
 addSection(report, `Multiword changes (${multiwords.length} themes)`, multiwords);
 
+const statsChanges = [];
+for (const key of new Set([...Object.keys(oldStats), ...Object.keys(newStats)])) {
+  if (!Object.hasOwn(oldStats, key)) statsChanges.push(`- Added ${inline(key)}`);
+  else if (!Object.hasOwn(newStats, key)) statsChanges.push(`- Removed ${inline(key)}`);
+  else if (!isDeepStrictEqual(oldStats[key], newStats[key])) statsChanges.push(`- Updated ${inline(key)}`);
+}
+addSection(report, `Stats strings (${statsChanges.length} changed)`, statsChanges);
+
 const languages = [...byLanguage].filter(([, counts]) => Object.values(counts).some(Boolean));
 if (languages.length > 0) {
   report.push('### Translation changes by language', '',
@@ -126,8 +140,8 @@ if (languages.length > 0) {
   report.push('');
 }
 
-if (before !== after && !themeChanges.length && !shortcuts.length && !multiwords.length && !languages.length) {
-  report.push('_No theme, shortcut, multiword, or translation changes were detected._', '');
+if (before !== after && !themeChanges.length && !shortcuts.length && !multiwords.length && !languages.length && !statsChanges.length) {
+  report.push('_No theme or stats string changes were detected._', '');
 }
 
 console.log(report.join('\n'));

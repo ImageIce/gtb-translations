@@ -1,11 +1,14 @@
 use anyhow::{anyhow, bail, Context, Result};
-use crowdin_api::common::crowdin_api_dir;
+use crowdin_api::analysis::generate::write_json_pretty;
+use crowdin_api::analysis::types::OutputTranslation as PublishedTranslation;
+use crowdin_api::common::{crowdin_api_dir, repo_root};
 use futures::{stream, StreamExt, TryStreamExt};
+use indexmap::IndexMap;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::{header, Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
@@ -125,6 +128,7 @@ struct Config {
 #[derive(Debug, Clone, Deserialize)]
 struct TargetLanguage {
     id: String,
+    code: String,
 }
 
 #[derive(Debug, Clone)]
@@ -152,14 +156,29 @@ struct CrowdinCrawler {
 struct MetaItem {
     id: String,
     theme: String,
+    source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct OutputTheme {
     id: Value,
     theme: String,
+    #[serde(skip)]
+    source: Option<String>,
     translations: Vec<OutputTranslation>,
 }
+
+#[derive(Debug, Serialize)]
+struct StatsString {
+    id: Value,
+    file_id: String,
+    key: String,
+    source: String,
+    translations: IndexMap<String, PublishedTranslation>,
+}
+
+// Crowdin file ID -> output name -> Crowdin string ID.
+type StatsSelection = BTreeMap<String, BTreeMap<String, String>>;
 
 #[derive(Debug, Clone, Serialize)]
 struct OutputTranslation {
@@ -290,14 +309,19 @@ impl CrowdinCrawler {
         bail!("retry loop exhausted for {}", label)
     }
 
-    async fn get_crowdin_phrase_data(&self, url: &str, page: usize) -> Result<Value> {
+    async fn get_crowdin_phrase_data(
+        &self,
+        url: &str,
+        file_id: &str,
+        page: usize,
+    ) -> Result<Value> {
         let mut payload = vec![
             ("project_id".to_string(), self.config.project_id.clone()),
             (
                 "target_language_id".to_string(),
                 self.config.meta_language_id.clone(),
             ),
-            ("file_id".to_string(), self.config.file_id.clone()),
+            ("file_id".to_string(), file_id.to_string()),
             ("page".to_string(), page.to_string()),
             ("filter".to_string(), "0".to_string()),
             ("custom_filter".to_string(), custom_filter_payload()),
@@ -314,7 +338,10 @@ impl CrowdinCrawler {
                 payload.extend([
                     ("request".to_string(), "3".to_string()),
                     ("view_in_context".to_string(), "0".to_string()),
-                    ("multilingual_without_languages".to_string(), "0".to_string()),
+                    (
+                        "multilingual_without_languages".to_string(),
+                        "0".to_string(),
+                    ),
                 ]);
                 format!("phrases with suggestions page {}", page)
             }
@@ -323,7 +350,9 @@ impl CrowdinCrawler {
                 format!("phrases page {}", page)
             }
         };
-        let text = self.post_form_text_with_retry(url, &label, &payload).await?;
+        let text = self
+            .post_form_text_with_retry(url, &label, &payload)
+            .await?;
 
         let root: Value =
             serde_json::from_str(&text).context("failed to parse phrases endpoint JSON")?;
@@ -419,21 +448,28 @@ impl CrowdinCrawler {
         Ok(merged)
     }
 
-    async fn crawl(&self) -> Result<Vec<OutputTheme>> {
+    async fn crawl(
+        &self,
+        file_id: &str,
+        selection: Option<&HashSet<&str>>,
+    ) -> Result<Vec<OutputTheme>> {
         let started_at = Instant::now();
         let interactive = io::stderr().is_terminal();
         let concurrency = crawler_concurrency();
         let count = self
-            .get_crowdin_phrase_data(CROWDIN_PHRASES_COUNT_URL, 1)
+            .get_crowdin_phrase_data(CROWDIN_PHRASES_COUNT_URL, file_id, 1)
             .await?;
         let total_pages = extract_positive_usize(&count, "pages")
             .context("invalid `pages` in phrase count response")?;
-        extract_positive_usize(&count, "found").context("invalid `found` in phrase count response")?;
-        let first_page = self.get_crowdin_phrase_data(CROWDIN_PHRASES_URL, 1).await?;
+        extract_positive_usize(&count, "found")
+            .context("invalid `found` in phrase count response")?;
+        let first_page = self
+            .get_crowdin_phrase_data(CROWDIN_PHRASES_URL, file_id, 1)
+            .await?;
         // The editor's detailed listing includes approval timestamps for the meta language.
         // The count comes from a separate endpoint even when the detailed listing is available.
         let detailed_page = self
-            .get_crowdin_phrase_data(CROWDIN_PHRASES_WITH_SUGGESTIONS_URL, 1)
+            .get_crowdin_phrase_data(CROWDIN_PHRASES_WITH_SUGGESTIONS_URL, file_id, 1)
             .await
             .ok()
             .filter(|data| matches_phrase_page(&first_page, data));
@@ -441,7 +477,7 @@ impl CrowdinCrawler {
             Some(data) => (CROWDIN_PHRASES_WITH_SUGGESTIONS_URL, data),
             None => (CROWDIN_PHRASES_URL, first_page),
         };
-        eprintln!("crawler: using phrase listing at {phrases_url}");
+        eprintln!("crawler: using phrase listing at {phrases_url} for file {file_id}");
 
         let mut meta_items = Vec::new();
         let mut meta_translations: HashMap<String, OutputTranslation> = HashMap::new();
@@ -449,6 +485,7 @@ impl CrowdinCrawler {
         parse_page_phrases(
             &first_page,
             &self.config.meta_language_id,
+            selection,
             &mut meta_items,
             &mut meta_translations,
         )
@@ -474,7 +511,9 @@ impl CrowdinCrawler {
                     let page_progress = page_progress.clone();
                     let page_bar = page_bar.clone();
                     async move {
-                        let data = crawler.get_crowdin_phrase_data(phrases_url, page).await?;
+                        let data = crawler
+                            .get_crowdin_phrase_data(phrases_url, file_id, page)
+                            .await?;
                         let done = page_progress.fetch_add(1, Ordering::Relaxed) + 1;
                         if interactive {
                             page_bar.set_position(done as u64);
@@ -494,6 +533,7 @@ impl CrowdinCrawler {
                 parse_page_phrases(
                     &data,
                     &self.config.meta_language_id,
+                    selection,
                     &mut meta_items,
                     &mut meta_translations,
                 )
@@ -504,9 +544,28 @@ impl CrowdinCrawler {
             page_bar.finish_with_message(format!("pages  done ({total_pages} pages)"));
         }
 
+        if let Some(selection) = selection {
+            let missing: Vec<_> = selection
+                .iter()
+                .filter(|id| !meta_translations.contains_key(**id))
+                .copied()
+                .collect();
+            if !missing.is_empty() {
+                bail!(
+                    "Crowdin file {file_id} is missing configured strings: {}",
+                    missing.join(", ")
+                );
+            }
+        }
+
         let items = Arc::new(meta_items);
         let meta_map = Arc::new(meta_translations);
         let theme_total = items.len();
+        let kind = if selection.is_some() {
+            "stats strings"
+        } else {
+            "themes"
+        };
         let theme_progress = Arc::new(AtomicUsize::new(0));
         let theme_bar = progress_bar(
             theme_total,
@@ -514,7 +573,7 @@ impl CrowdinCrawler {
         );
 
         if !interactive {
-            eprintln!("crawler: fetching translations for {theme_total} themes");
+            eprintln!("crawler: fetching translations for {theme_total} {kind}");
         }
 
         let crawled: Vec<OutputTheme> = stream::iter(items.iter().cloned())
@@ -541,7 +600,7 @@ impl CrowdinCrawler {
                     if interactive {
                         theme_bar.set_position(done as u64);
                     } else if should_log_progress(done, theme_total, THEME_PROGRESS_STEP) {
-                        eprintln!("crawler: fetched theme translations {done}/{theme_total}");
+                        eprintln!("crawler: fetched {kind} translations {done}/{theme_total}");
                     }
                     Ok::<OutputTheme, anyhow::Error>(output)
                 }
@@ -551,17 +610,91 @@ impl CrowdinCrawler {
             .await?;
         if interactive {
             theme_bar.finish_with_message(format!(
-                "themes done ({} themes, {:.1}s)",
+                "{kind} done ({} entries, {:.1}s)",
                 crawled.len(),
                 started_at.elapsed().as_secs_f32()
             ));
         }
         eprintln!(
-            "crawler: completed {} themes in {:.1}s",
+            "crawler: completed {} {kind} in {:.1}s",
             crawled.len(),
             started_at.elapsed().as_secs_f32()
         );
         Ok(crawled)
+    }
+
+    async fn crawl_stats(
+        &self,
+        selection: StatsSelection,
+    ) -> Result<BTreeMap<String, StatsString>> {
+        let languages: HashMap<_, _> = self
+            .config
+            .target_languages
+            .iter()
+            .filter(|language| language.id != "-1")
+            .map(|language| {
+                let code = match language.id.as_str() {
+                    "109" => "pirate",
+                    "63" => "pt_br",
+                    _ => language.code.as_str(),
+                };
+                (language.id.as_str(), code)
+            })
+            .collect();
+        let mut output = BTreeMap::new();
+        for (file_id, names) in selection {
+            let ids: HashSet<_> = names.values().map(String::as_str).collect();
+            if ids.is_empty() || ids.len() != names.len() {
+                bail!("Crowdin file {file_id} requires distinct, nonempty stats string selections");
+            }
+            let mut phrases: HashMap<_, _> = self
+                .crawl(&file_id, Some(&ids))
+                .await?
+                .into_iter()
+                .map(|phrase| (phrase.id.to_string(), phrase))
+                .collect();
+            for (name, id) in names {
+                let phrase = phrases
+                    .remove(&id)
+                    .with_context(|| format!("missing stats string {name} ({file_id}/{id})"))?;
+                let source = phrase
+                    .source
+                    .filter(|text| !text.is_empty())
+                    .with_context(|| {
+                        format!("missing source text for stats string {name} ({file_id}/{id})")
+                    })?;
+                let translations = phrase
+                    .translations
+                    .into_iter()
+                    .filter_map(|entry| {
+                        let code = languages.get(entry.language_id.as_deref()?)?;
+                        let text = entry.text.filter(|text| !text.is_empty())?;
+                        Some((
+                            (*code).to_string(),
+                            PublishedTranslation {
+                                translation: Some(text),
+                                is_approved: entry.is_approved,
+                                approved_at: entry.approved_at,
+                            },
+                        ))
+                    })
+                    .collect();
+                let string = StatsString {
+                    id: phrase.id,
+                    file_id: file_id.clone(),
+                    key: phrase.theme,
+                    source,
+                    translations,
+                };
+                if output.insert(name.clone(), string).is_some() {
+                    bail!("duplicate stats string name {name}");
+                }
+            }
+        }
+        if output.is_empty() {
+            bail!("stats string selection is empty");
+        }
+        Ok(output)
     }
 }
 
@@ -591,12 +724,15 @@ fn matches_phrase_page(flat: &Value, detailed: &Value) -> bool {
         && flat.iter().zip(detailed).all(|(flat, detailed)| {
             value_to_string_ref(&flat["id"]) == value_to_string_ref(&detailed["translation"]["id"])
         })
-        && detailed.iter().any(|phrase| phrase["suggestions"].is_array())
+        && detailed
+            .iter()
+            .any(|phrase| phrase["suggestions"].is_array())
 }
 
 fn parse_page_phrases(
     page_data: &Value,
     meta_language_id: &str,
+    selection: Option<&HashSet<&str>>,
     meta_items: &mut Vec<MetaItem>,
     meta_translations: &mut HashMap<String, OutputTranslation>,
 ) -> Result<()> {
@@ -616,6 +752,9 @@ fn parse_page_phrases(
             .ok_or_else(|| anyhow!("translation missing `id`"))?
             .clone();
         let id = value_to_string(&id_value).ok_or_else(|| anyhow!("invalid translation id"))?;
+        if selection.is_some_and(|ids| !ids.contains(id.as_str())) {
+            continue;
+        }
         let theme = translation
             .get("key")
             .and_then(Value::as_str)
@@ -625,6 +764,10 @@ fn parse_page_phrases(
         meta_items.push(MetaItem {
             id: id.clone(),
             theme,
+            source: translation
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         });
 
         let suggestion = phrase
@@ -709,6 +852,7 @@ fn build_output_theme(
     Ok(OutputTheme {
         id: parse_id_value(&item.id),
         theme: item.theme,
+        source: item.source,
         translations,
     })
 }
@@ -804,6 +948,12 @@ fn write_output(path: &Path, data: &[OutputTheme]) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<_> = env::args().skip(1).collect();
+    let stats = match args.as_slice() {
+        [] => false,
+        [arg] if arg == "--stats" => true,
+        _ => bail!("usage: crawler [--stats]"),
+    };
     let paths = resolve_paths()?;
     let mut config: Config = read_json_file(&paths.config_file)?;
     config.meta_language_id =
@@ -811,7 +961,16 @@ async fn main() -> Result<()> {
     let creds = load_credentials(&paths.env_file)?;
 
     let crawler = CrowdinCrawler::new(Arc::new(config), Arc::new(creds))?;
-    let data = crawler.crawl().await?;
-    write_output(&paths.output_file, &data)?;
+    if stats {
+        let selection = read_json_file(&crowdin_api_dir()?.join("conf/stats-strings.json"))?;
+        let data = crawler.crawl_stats(selection).await?;
+        write_json_pretty(
+            &repo_root()?.join("lib/source/stats-translations.json"),
+            &data,
+        )?;
+    } else {
+        let data = crawler.crawl(&crawler.config.file_id, None).await?;
+        write_output(&paths.output_file, &data)?;
+    }
     Ok(())
 }
