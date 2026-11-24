@@ -572,8 +572,8 @@ fn parse_page_phrases(
     for phrase in phrases {
         let translation = phrase
             .get("translation")
-            .and_then(Value::as_object)
-            .ok_or_else(|| anyhow!("phrase missing `translation` object"))?;
+            .filter(|value| value.is_object())
+            .unwrap_or(phrase);
 
         let id_value = translation
             .get("id")
@@ -591,33 +591,37 @@ fn parse_page_phrases(
             theme,
         });
 
-        let suggestions = phrase
+        let suggestion = phrase
             .get("suggestions")
             .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-
-        let suggestion = suggestions
-            .first()
-            .cloned()
-            .unwrap_or(Value::Object(Default::default()));
+            .and_then(|suggestions| suggestions.first());
         let validation = suggestion
-            .get("validations")
-            .and_then(|v| v.get("2"))
-            .cloned()
-            .unwrap_or(Value::Object(Default::default()));
+            .and_then(|suggestion| suggestion.get("validations"))
+            .and_then(|validations| validations.get("2"));
+        let phrase_approved = phrase.get("is_fully_approved").and_then(Value::as_u64) == Some(1);
 
         let item = OutputTranslation {
-            id: suggestion.get("id").and_then(value_to_string_ref),
-            text: suggestion.get("text").and_then(value_to_string_ref),
+            id: suggestion
+                .and_then(|suggestion| suggestion.get("id"))
+                .and_then(value_to_string_ref),
+            text: suggestion
+                .and_then(|suggestion| suggestion.get("text"))
+                .and_then(value_to_string_ref)
+                .or_else(|| {
+                    phrase
+                        .get("top_suggestion_text")
+                        .and_then(value_to_string_ref)
+                }),
             language_id: Some(meta_language_id.to_string()),
             is_approved: validation
-                .get("approved")
+                .and_then(|validation| validation.get("approved"))
                 .and_then(Value::as_bool)
-                .unwrap_or(false),
-            approved_by: validation.get("approved_by").and_then(value_to_string_ref),
+                .unwrap_or(phrase_approved),
+            approved_by: validation
+                .and_then(|validation| validation.get("approved_by"))
+                .and_then(value_to_string_ref),
             approved_at: validation
-                .get("approved_date_iso")
+                .and_then(|validation| validation.get("approved_date_iso"))
                 .and_then(value_to_string_ref),
         };
 
