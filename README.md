@@ -17,7 +17,9 @@ Open **Actions → Sync translation data → Run workflow** on the default branc
   Set the Actions variable `CROWDIN_META_LANGUAGE_ID` to your approved translation group's
   [language ID](crowdin_api/conf/config.json). It defaults to `55` for Chinese Simplified.
 
-The workflow validates the JSON and commits changes to the default branch. The upstream project documents
+The workflow validates the JSON and commits changes to the default branch. Each run includes a
+Database Changes Report in its Actions summary. Published updates also get a report on the data commit.
+The upstream project documents
 the crawler and its configuration in the [maintainers guide](crowdin_api/MAINTAINERS.md).
 
 GTB Platform is a comprehensive training and statistics platform for Hypixel Guess The Build players, featuring three main components:

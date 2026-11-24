@@ -30,6 +30,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 2
 
       - name: Fetch the published upstream snapshot
         if: inputs.source == 'upstream'
@@ -66,17 +67,73 @@ jobs:
           jq -e '.last_updated | type == "string" and test("^[0-9]{4}/[0-9]{2}/[0-9]{2}$")' lib/source/versions.json > /dev/null
 
       - name: Publish updated data to this repository
+        id: publish
         run: |
-          if [[ "$SYNC_SOURCE" == crowdin ]] && git diff --quiet -- lib/source/translations-data.json; then
-            echo 'Translation data is unchanged.'
-            exit 0
+          before=$(git rev-parse HEAD)
+          if [[ "$SYNC_SOURCE" != crowdin ]] || ! git diff --quiet -- lib/source/translations-data.json; then
+            git add -- lib/source/translations-data.json lib/source/versions.json
           fi
-          git add -- lib/source/translations-data.json lib/source/versions.json
           if git diff --cached --quiet; then
-            echo 'Translation snapshot is unchanged.'
+            # A retry can reach this point after the previous attempt published successfully.
+            if [[ "$(git log -1 --format='%(trailers:key=Translation-Sync-Run,valueonly)')" == "$GITHUB_RUN_ID" ]]; then
+              printf 'before=%s\nafter=%s\n' "$(git rev-parse HEAD^)" "$before" >> "$GITHUB_OUTPUT"
+            else
+              printf 'before=%s\nafter=%s\n' "$before" "$before" >> "$GITHUB_OUTPUT"
+            fi
             exit 0
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m "Update translation data from $SYNC_SOURCE"
+          git commit -m "Update translation data from $SYNC_SOURCE" -m "Translation-Sync-Run: $GITHUB_RUN_ID"
           git push origin "HEAD:$GITHUB_REF"
+          printf 'before=%s\nafter=%s\n' "$before" "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Write Database Changes Report
+        env:
+          BEFORE: ${{ steps.publish.outputs.before }}
+          AFTER: ${{ steps.publish.outputs.after }}
+        run: |
+          report="$RUNNER_TEMP/database-changes.md"
+          node crowdin_api/scripts/database-report.mjs "$BEFORE" "$AFTER" > "$report"
+          {
+            printf '\nSource: `%s` · [Workflow run](%s/%s/actions/runs/%s)\n' \
+              "$SYNC_SOURCE" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            if [[ "$BEFORE" != "$AFTER" ]]; then
+              printf '\n[View the data diff](%s/%s/compare/%s...%s)\n' \
+                "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$BEFORE" "$AFTER"
+            fi
+          } >> "$report"
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post report on the data commit
+        if: steps.publish.outputs.before != steps.publish.outputs.after
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AFTER: ${{ steps.publish.outputs.after }}
+        run: |
+          endpoint="repos/$GITHUB_REPOSITORY/commits/$AFTER/comments"
+          marker="<!-- translation-data-report:$GITHUB_RUN_ID -->"
+          link=$(gh api --paginate "$endpoint" --jq \
+            ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$marker\"))) | .html_url")
+          if [[ -z "$link" ]]; then
+            report="$RUNNER_TEMP/database-changes.md"
+            comment="$RUNNER_TEMP/database-changes-comment.md"
+            if [[ $(wc -c < "$report") -gt 60000 ]]; then
+              printf '## Database Changes Report\n\n[Read the report for this update](%s/%s/actions/runs/%s).\n' \
+                "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$comment"
+            else
+              cp "$report" "$comment"
+            fi
+            printf '\n%s\n' "$marker" >> "$comment"
+            link=$(gh api "$endpoint" -F "body=@$comment" --jq .html_url)
+          fi
+          printf '\n[Report posted on the data commit](%s)\n' "$link" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report an incomplete sync
+        if: failure()
+        run: |
+          if [[ -s "$RUNNER_TEMP/database-changes.md" ]]; then
+            printf '\nThe run encountered an error after generating the report. See the failed step for details.\n' >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '## Database Changes Report\n\nThe sync stopped before a report could be published. See the failed step for details.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
