@@ -3,6 +3,23 @@
   <h1>GTB Platform</h1>
 </div>
 
+## GitHub translation data mirror
+
+This fork hosts the GTB translation data in [`lib/source/translations-data.json`](lib/source/translations-data.json)
+with the snapshot date in [`lib/source/versions.json`](lib/source/versions.json). Use the **Raw** link
+on each file for the HTTPS URL.
+
+Open **Actions → Sync translation data → Run workflow** on the default branch to refresh both files.
+
+- **upstream** copies the latest published data from `zmh-program/gtb_platform` and needs no Crowdin credentials.
+- **crowdin** runs the bundled crawler and analysis using a Crowdin account with access to the Hypixel translation project.
+  Set `CROWDIN_COOKIE` and `CROWDIN_CSRF_TOKEN` under **Settings → Secrets and variables → Actions → Secrets**.
+  Set the Actions variable `CROWDIN_META_LANGUAGE_ID` to your approved translation group's
+  [language ID](crowdin_api/conf/config.json). It defaults to `55` for Chinese Simplified.
+
+The workflow validates the JSON and commits changes to the default branch. The upstream project documents
+the crawler and its configuration in the [maintainers guide](crowdin_api/MAINTAINERS.md).
+
 GTB Platform is a comprehensive training and statistics platform for Hypixel Guess The Build players, featuring three main components:
 
 ## `1` GTB Word Hint Training [👉 Here](https://gtb.zmh.me)
