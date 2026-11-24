@@ -40079,6 +40079,11 @@
       }
     ],
     "translations": {
+      "co": {
+        "translation": "coloured pencil",
+        "is_approved": true,
+        "approved_at": ""
+      },
       "ru": {
         "translation": "Цветные карандаши",
         "is_approved": true,
@@ -101065,7 +101070,21 @@
     "id": 214699,
     "theme": "Laptop",
     "shortcut": null,
-    "multiwords": [],
+    "multiwords": [
+      {
+        "multiword": "notebook",
+        "occurrences": [
+          {
+            "theme": "Laptop",
+            "reference": "Portuguese, Brazilian"
+          },
+          {
+            "theme": "Notepad",
+            "reference": "Complement"
+          }
+        ]
+      }
+    ],
     "translations": {
       "ru": {
         "translation": "Ноутбук",
@@ -122999,8 +123018,27 @@
     "id": 214945,
     "theme": "Notepad",
     "shortcut": null,
-    "multiwords": [],
+    "multiwords": [
+      {
+        "multiword": "notebook",
+        "occurrences": [
+          {
+            "theme": "Laptop",
+            "reference": "Portuguese, Brazilian"
+          },
+          {
+            "theme": "Notepad",
+            "reference": "Complement"
+          }
+        ]
+      }
+    ],
     "translations": {
+      "co": {
+        "translation": "notebook",
+        "is_approved": true,
+        "approved_at": ""
+      },
       "ru": {
         "translation": "Блокнот",
         "is_approved": true,
@@ -192877,6 +192915,11 @@
       }
     ],
     "translations": {
+      "co": {
+        "translation": "theatre",
+        "is_approved": true,
+        "approved_at": ""
+      },
       "ru": {
         "translation": "Театр",
         "is_approved": true,
@@ -199819,6 +199862,11 @@
     "shortcut": "ampel",
     "multiwords": [],
     "translations": {
+      "co": {
+        "translation": "stoplight",
+        "is_approved": true,
+        "approved_at": ""
+      },
       "ru": {
         "translation": "Светофор",
         "is_approved": true,
