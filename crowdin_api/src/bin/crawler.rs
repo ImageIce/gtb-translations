@@ -17,6 +17,8 @@ use tokio::time::{sleep, Duration};
 
 const CROWDIN_PHRASES_URL: &str = "https://crowdin.com/backend/phrases";
 const CROWDIN_PHRASES_COUNT_URL: &str = "https://crowdin.com/backend/phrases/bilingual_count";
+const CROWDIN_PHRASES_WITH_SUGGESTIONS_URL: &str =
+    "https://crowdin.com/backend/phrases/phrases_with_suggestions";
 const CROWDIN_ALL_LANG_URL: &str = "https://crowdin.com/backend/suggestions/all_languages";
 const DEFAULT_CONCURRENCY: usize = 32;
 const MAX_CONCURRENCY: usize = 64;
@@ -306,11 +308,20 @@ impl CrowdinCrawler {
             ("search_strict".to_string(), "false".to_string()),
             ("show_contextual_strings".to_string(), "false".to_string()),
         ];
-        let label = if url == CROWDIN_PHRASES_URL {
-            payload.push(("request".to_string(), "1".to_string()));
-            format!("phrases page {}", page)
-        } else {
-            "phrase count".to_string()
+        let label = match url {
+            CROWDIN_PHRASES_COUNT_URL => "phrase count".to_string(),
+            CROWDIN_PHRASES_WITH_SUGGESTIONS_URL => {
+                payload.extend([
+                    ("request".to_string(), "3".to_string()),
+                    ("view_in_context".to_string(), "0".to_string()),
+                    ("multilingual_without_languages".to_string(), "0".to_string()),
+                ]);
+                format!("phrases with suggestions page {}", page)
+            }
+            _ => {
+                payload.push(("request".to_string(), "1".to_string()));
+                format!("phrases page {}", page)
+            }
         };
         let text = self.post_form_text_with_retry(url, &label, &payload).await?;
 
@@ -419,6 +430,18 @@ impl CrowdinCrawler {
             .context("invalid `pages` in phrase count response")?;
         extract_positive_usize(&count, "found").context("invalid `found` in phrase count response")?;
         let first_page = self.get_crowdin_phrase_data(CROWDIN_PHRASES_URL, 1).await?;
+        // The editor's detailed listing includes approval timestamps for the meta language.
+        // The count comes from a separate endpoint even when the detailed listing is available.
+        let detailed_page = self
+            .get_crowdin_phrase_data(CROWDIN_PHRASES_WITH_SUGGESTIONS_URL, 1)
+            .await
+            .ok()
+            .filter(|data| matches_phrase_page(&first_page, data));
+        let (phrases_url, first_page) = match detailed_page {
+            Some(data) => (CROWDIN_PHRASES_WITH_SUGGESTIONS_URL, data),
+            None => (CROWDIN_PHRASES_URL, first_page),
+        };
+        eprintln!("crawler: using phrase listing at {phrases_url}");
 
         let mut meta_items = Vec::new();
         let mut meta_translations: HashMap<String, OutputTranslation> = HashMap::new();
@@ -451,7 +474,7 @@ impl CrowdinCrawler {
                     let page_progress = page_progress.clone();
                     let page_bar = page_bar.clone();
                     async move {
-                        let data = crawler.get_crowdin_phrase_data(CROWDIN_PHRASES_URL, page).await?;
+                        let data = crawler.get_crowdin_phrase_data(phrases_url, page).await?;
                         let done = page_progress.fetch_add(1, Ordering::Relaxed) + 1;
                         if interactive {
                             page_bar.set_position(done as u64);
@@ -556,6 +579,19 @@ fn retry_after_ms(headers: &header::HeaderMap) -> Option<u64> {
 
 fn should_log_progress(done: usize, total: usize, step: usize) -> bool {
     done == 1 || done == total || done.is_multiple_of(step)
+}
+
+fn matches_phrase_page(flat: &Value, detailed: &Value) -> bool {
+    let (Some(flat), Some(detailed)) = (flat["phrases"].as_array(), detailed["phrases"].as_array())
+    else {
+        return false;
+    };
+    !detailed.is_empty()
+        && detailed.len() == flat.len()
+        && flat.iter().zip(detailed).all(|(flat, detailed)| {
+            value_to_string_ref(&flat["id"]) == value_to_string_ref(&detailed["translation"]["id"])
+        })
+        && detailed.iter().any(|phrase| phrase["suggestions"].is_array())
 }
 
 fn parse_page_phrases(
