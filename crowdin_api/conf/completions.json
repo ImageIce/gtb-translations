@@ -28,5 +28,9 @@
   "rotary": ["Roundabout"],
   "motorbike": ["Motorcycle"],
   "ice cream van": ["Ice Cream Truck"],
-  "pajamas": ["Pyjamas"]
+  "pajamas": ["Pyjamas"],
+  "coloured pencil": ["Colored Pencil"],
+  "stoplight": ["Traffic Lights"],
+  "notebook": ["Notepad"],
+  "theatre": ["Theater"]
 }
