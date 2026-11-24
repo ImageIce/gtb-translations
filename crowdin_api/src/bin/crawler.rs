@@ -171,6 +171,7 @@ struct OutputTranslation {
 impl CrowdinCrawler {
     fn new(config: Arc<Config>, creds: Arc<Credentials>) -> Result<Self> {
         let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("failed to build HTTP client")?;
         let language_order = config
@@ -261,7 +262,7 @@ impl CrowdinCrawler {
                         continue;
                     }
 
-                    bail!("HTTP error {} from {} endpoint: {}", status, label, text);
+                    bail!("HTTP error {} from {} endpoint", status, label);
                 }
                 Err(err) => {
                     if attempt < max_retries {
